@@ -1,0 +1,25 @@
+# Dependencies
+node_modules/
+*/node_modules/
+
+# Environment variables (NEVER COMMIT SENSITIVE KEYS)
+.env
+.env.*
+!.env.example
+*/.env
+*/.env.*
+!*/.env.example
+
+# Build outputs
+dist/
+build/
+*/dist/
+*/build/
+
+# SQLite database files
+*.db
+*.db-wal
+*.db-shm
+data/
+*/data/
+

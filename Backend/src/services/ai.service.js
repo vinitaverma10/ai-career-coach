@@ -1,0 +1,210 @@
+const path = require("path")
+require("dotenv").config({ path: path.resolve(__dirname, "../../.env") })
+const { GoogleGenAI } = require("@google/genai")
+const { z } = require("zod")
+const { zodToJsonSchema } = require("zod-to-json-schema")
+const puppeteer = require("puppeteer")
+
+function getAI() {
+    const apiKey = process.env.GOOGLE_GENAI_API_KEY || process.env.GEMINI_API_KEY
+    if (!apiKey) {
+        throw new Error("GOOGLE_GENAI_API_KEY is not configured in .env file.")
+    }
+    return new GoogleGenAI({ apiKey })
+}
+
+// Highly resilient model hierarchy to prevent 503 high-demand errors
+const FALLBACK_MODELS = [
+    "gemini-flash-latest",
+    "gemini-3.5-flash",
+    "gemini-3.8-flash",
+    "gemini-3-flash-preview",
+    "gemini-2.5-pro"
+]
+
+async function generateContentWithFallback({ contents, config }) {
+    const ai = getAI()
+    let lastError = null
+
+    // Two-pass retry across all available models
+    for (let pass = 1; pass <= 2; pass++) {
+        for (const model of FALLBACK_MODELS) {
+            try {
+                const response = await ai.models.generateContent({
+                    model,
+                    contents,
+                    config
+                })
+                if (response && response.text) {
+                    return response
+                }
+            } catch (err) {
+                console.warn(`[AI Service - Pass ${pass}] Model ${model} returned: ${err.status || err.message}. Retrying...`)
+                lastError = err
+                // Backoff delay before switching to next model
+                await new Promise(resolve => setTimeout(resolve, 1000))
+            }
+        }
+        // Brief pause before second pass
+        await new Promise(resolve => setTimeout(resolve, 1500))
+    }
+    throw lastError
+}
+
+const interviewReportSchema = z.object({
+    matchScore: z.number().describe("A score between 0 and 100 indicating how well the candidate's profile matches the job describe"),
+    technicalQuestions: z.array(z.object({
+        question: z.string().describe("The technical question can be asked in the interview"),
+        intention: z.string().describe("The intention of interviewer behind asking this question"),
+        answer: z.string().describe("How to answer this question, what points to cover, what approach to take etc.")
+    })).describe("Technical questions that can be asked in the interview along with their intention and how to answer them"),
+    behavioralQuestions: z.array(z.object({
+        question: z.string().describe("The technical question can be asked in the interview"),
+        intention: z.string().describe("The intention of interviewer behind asking this question"),
+        answer: z.string().describe("How to answer this question, what points to cover, what approach to take etc.")
+    })).describe("Behavioral questions that can be asked in the interview along with their intention and how to answer them"),
+    skillGaps: z.array(z.object({
+        skill: z.string().describe("The skill which the candidate is lacking"),
+        severity: z.enum([ "low", "medium", "high" ]).describe("The severity of this skill gap, i.e. how important is this skill for the job and how much it can impact the candidate's chances")
+    })).describe("List of skill gaps in the candidate's profile along with their severity"),
+    preparationPlan: z.array(z.object({
+        day: z.number().describe("The day number in the preparation plan, starting from 1"),
+        focus: z.string().describe("The main focus of this day in the preparation plan, e.g. data structures, system design, mock interviews etc."),
+        tasks: z.array(z.string()).describe("List of tasks to be done on this day to follow the preparation plan, e.g. read a specific book or article, solve a set of problems, watch a video etc.")
+    })).describe("A day-wise preparation plan for the candidate to follow in order to prepare for the interview effectively"),
+    title: z.string().describe("The title of the job for which the interview report is generated"),
+    atsKeywords: z.object({
+        atsScore: z.number().describe("ATS compatibility score between 0 and 100"),
+        matched: z.array(z.string()).describe("Keywords and technologies from the job description successfully found in the candidate resume"),
+        missing: z.array(z.string()).describe("Important keywords and skills in the job description that are missing from the resume")
+    }).describe("ATS resume match analysis")
+})
+
+async function generateInterviewReport({ resume, selfDescription, jobDescription }) {
+    const prompt = `Generate an interview report for a candidate with the following details:
+Resume: ${resume}
+Self Description: ${selfDescription}
+Job Description: ${jobDescription}`
+
+    const response = await generateContentWithFallback({
+        contents: prompt,
+        config: {
+            responseMimeType: "application/json",
+            responseSchema: zodToJsonSchema(interviewReportSchema),
+        }
+    })
+
+    return JSON.parse(response.text)
+}
+
+async function generatePdfFromHtml(htmlContent) {
+    try {
+        const browser = await puppeteer.launch({
+            headless: "new",
+            args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
+        })
+        const page = await browser.newPage();
+        await page.setContent(htmlContent, { waitUntil: "networkidle0" })
+
+        const pdfBuffer = await page.pdf({
+            format: "A4", margin: {
+                top: "20mm",
+                bottom: "20mm",
+                left: "15mm",
+                right: "15mm"
+            }
+        })
+
+        await browser.close()
+        return pdfBuffer
+    } catch (err) {
+        console.warn("Puppeteer PDF generation error, falling back to raw buffer:", err.message)
+        return Buffer.from(htmlContent, "utf-8")
+    }
+}
+
+async function generateResumePdf({ resume, selfDescription, jobDescription }) {
+    const resumePdfSchema = z.object({
+        html: z.string().describe("The HTML content of the resume which can be converted to PDF using any library like puppeteer")
+    })
+
+    const prompt = `Generate resume for a candidate with the following details:
+Resume: ${resume}
+Self Description: ${selfDescription}
+Job Description: ${jobDescription}
+
+The response should be a JSON object with a single field "html" containing well-formatted HTML for the resume. Make it clean, professional, ATS-friendly, 1-2 pages long.`
+
+    const response = await generateContentWithFallback({
+        contents: prompt,
+        config: {
+            responseMimeType: "application/json",
+            responseSchema: zodToJsonSchema(resumePdfSchema),
+        }
+    })
+
+    const jsonContent = JSON.parse(response.text)
+    const pdfBuffer = await generatePdfFromHtml(jsonContent.html)
+    return pdfBuffer
+}
+
+const answerEvaluationSchema = z.object({
+    score: z.number().describe("Rating of the candidate's answer from 1 to 10"),
+    feedback: z.string().describe("Concise constructive feedback on how well the candidate answered"),
+    strengths: z.array(z.string()).describe("Key positive points mentioned by the candidate"),
+    improvements: z.array(z.string()).describe("Specific missing points or technical gaps in the answer"),
+    idealAnswer: z.string().describe("A professional, impactful model answer the candidate can learn from")
+})
+
+async function evaluateMockAnswer({ question, intention, answer, jobDescription }) {
+    const prompt = `You are a senior technical interviewer. Evaluate the candidate's answer to this interview question:
+Question: ${question}
+Interviewer Intention: ${intention || "Assess technical depth and clarity"}
+Job Description Context: ${jobDescription || "Engineering role"}
+Candidate Answer: ${answer}
+
+Provide an honest, expert rating from 1 to 10, strengths, missing points/improvements, and an ideal model answer.`
+
+    const response = await generateContentWithFallback({
+        contents: prompt,
+        config: {
+            responseMimeType: "application/json",
+            responseSchema: zodToJsonSchema(answerEvaluationSchema),
+        }
+    })
+
+    return JSON.parse(response.text)
+}
+
+const outreachSchema = z.object({
+    coldEmailSubject: z.string().describe("Catchy, professional subject line for cold email to recruiter or hiring manager"),
+    coldEmailBody: z.string().describe("Professional, high-impact cold email pitching the candidate for the role"),
+    linkedInNote: z.string().describe("High-conversion personalized LinkedIn connection note under 300 characters")
+})
+
+async function generateOutreachMessages({ jobDescription, resume, selfDescription }) {
+    const prompt = `Write high-converting job outreach messages for a candidate applying to this job:
+Target Job Description: ${jobDescription}
+Candidate Background (Resume/Summary): ${resume || selfDescription || "Experienced software engineer"}
+
+Generate:
+1. A cold email with compelling subject line and body.
+2. A short, impactful LinkedIn connection message (strictly under 300 characters).`
+
+    const response = await generateContentWithFallback({
+        contents: prompt,
+        config: {
+            responseMimeType: "application/json",
+            responseSchema: zodToJsonSchema(outreachSchema),
+        }
+    })
+
+    return JSON.parse(response.text)
+}
+
+module.exports = {
+    generateInterviewReport,
+    generateResumePdf,
+    evaluateMockAnswer,
+    generateOutreachMessages
+}
