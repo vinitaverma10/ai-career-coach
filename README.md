@@ -241,15 +241,7 @@ Visit **`http://localhost:5173`** or **`http://localhost:5174`** in your browser
 
 ---
 
-## 👤 Author & Support
 
-- **Author:** Aaradhana Mewade
-- **GitHub:** [@aaradhana1712](https://github.com/aaradhana1712)
-- **LinkedIn:** [Connect on LinkedIn](https://linkedin.com/)
-
-⭐ **If you find this project helpful, give it a star on GitHub!**
-
----
 
 ## 📄 License
 This project is licensed under the [MIT License](LICENSE).
