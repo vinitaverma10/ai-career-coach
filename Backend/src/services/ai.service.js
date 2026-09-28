@@ -13,13 +13,12 @@ function getAI() {
     return new GoogleGenAI({ apiKey })
 }
 
-// Highly resilient model hierarchy to prevent 503 high-demand errors
+// Resilient model hierarchy using active Google Gemini API models
 const FALLBACK_MODELS = [
-    "gemini-flash-latest",
-    "gemini-3.5-flash",
-    "gemini-3.8-flash",
-    "gemini-3-flash-preview",
-    "gemini-2.5-pro"
+    "gemini-2.0-flash",
+    "gemini-1.5-flash",
+    "gemini-1.5-pro",
+    "gemini-2.0-flash-lite"
 ]
 
 async function generateContentWithFallback({ contents, config }) {
